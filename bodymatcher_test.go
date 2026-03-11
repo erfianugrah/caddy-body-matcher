@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
 
@@ -1033,5 +1035,519 @@ func TestBodyVars_CaddyModule(t *testing.T) {
 	}
 	if info.New == nil {
 		t.Error("expected non-nil New function")
+	}
+}
+
+// ─── Caddyfile Unmarshaling Tests ───────────────────────────────────
+
+func TestUnmarshalCaddyfile_InlineContains(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body contains "password"`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.Contains != "password" {
+		t.Errorf("expected Contains = %q, got %q", "password", m.Contains)
+	}
+}
+
+func TestUnmarshalCaddyfile_InlineEq(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body eq "exact match"`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.Equals != "exact match" {
+		t.Errorf("expected Equals = %q, got %q", "exact match", m.Equals)
+	}
+}
+
+func TestUnmarshalCaddyfile_InlineStartsWith(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body starts_with "BEGIN"`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.StartsWith != "BEGIN" {
+		t.Errorf("expected StartsWith = %q, got %q", "BEGIN", m.StartsWith)
+	}
+}
+
+func TestUnmarshalCaddyfile_InlineEndsWith(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body ends_with "</html>"`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.EndsWith != "</html>" {
+		t.Errorf("expected EndsWith = %q, got %q", "</html>", m.EndsWith)
+	}
+}
+
+func TestUnmarshalCaddyfile_InlineRegex(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body regex "^[a-z]+$"`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.Regex != "^[a-z]+$" {
+		t.Errorf("expected Regex = %q, got %q", "^[a-z]+$", m.Regex)
+	}
+}
+
+func TestUnmarshalCaddyfile_InlineJSON(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body json .user.role admin`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.JSONPath != ".user.role" {
+		t.Errorf("expected JSONPath = %q, got %q", ".user.role", m.JSONPath)
+	}
+	if m.JSONOp != "eq" {
+		t.Errorf("expected JSONOp = %q, got %q", "eq", m.JSONOp)
+	}
+	if m.JSONValue != "admin" {
+		t.Errorf("expected JSONValue = %q, got %q", "admin", m.JSONValue)
+	}
+}
+
+func TestUnmarshalCaddyfile_InlineJSONContains(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body json_contains .message hello`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.JSONPath != ".message" || m.JSONOp != "contains" || m.JSONValue != "hello" {
+		t.Errorf("unexpected state: path=%q op=%q value=%q", m.JSONPath, m.JSONOp, m.JSONValue)
+	}
+}
+
+func TestUnmarshalCaddyfile_InlineJSONRegex(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body json_regex .email "^.+@example\.com$"`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.JSONPath != ".email" || m.JSONOp != "regex" {
+		t.Errorf("unexpected state: path=%q op=%q", m.JSONPath, m.JSONOp)
+	}
+}
+
+func TestUnmarshalCaddyfile_InlineJSONExists(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body json_exists .auth.token`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.JSONPath != ".auth.token" || m.JSONOp != "exists" {
+		t.Errorf("unexpected state: path=%q op=%q", m.JSONPath, m.JSONOp)
+	}
+}
+
+func TestUnmarshalCaddyfile_InlineForm(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body form username admin`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.FormField != "username" || m.FormOp != "eq" || m.FormValue != "admin" {
+		t.Errorf("unexpected state: field=%q op=%q value=%q", m.FormField, m.FormOp, m.FormValue)
+	}
+}
+
+func TestUnmarshalCaddyfile_InlineFormContains(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body form_contains query SELECT`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.FormField != "query" || m.FormOp != "contains" || m.FormValue != "SELECT" {
+		t.Errorf("unexpected state: field=%q op=%q value=%q", m.FormField, m.FormOp, m.FormValue)
+	}
+}
+
+func TestUnmarshalCaddyfile_InlineFormRegex(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body form_regex email "@example\\.com$"`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.FormField != "email" || m.FormOp != "regex" {
+		t.Errorf("unexpected state: field=%q op=%q", m.FormField, m.FormOp)
+	}
+}
+
+func TestUnmarshalCaddyfile_BlockWithMaxSize(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body {
+	max_size 1mb
+	contains "search term"
+}`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.MaxSize != 1024*1024 {
+		t.Errorf("expected MaxSize = %d, got %d", 1024*1024, m.MaxSize)
+	}
+	if m.Contains != "search term" {
+		t.Errorf("expected Contains = %q, got %q", "search term", m.Contains)
+	}
+}
+
+func TestUnmarshalCaddyfile_BlockJSON(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body {
+	json .user.role admin
+}`)
+	err := m.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.JSONPath != ".user.role" || m.JSONOp != "eq" || m.JSONValue != "admin" {
+		t.Errorf("unexpected state: path=%q op=%q value=%q", m.JSONPath, m.JSONOp, m.JSONValue)
+	}
+}
+
+func TestUnmarshalCaddyfile_UnknownOperator(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body nope "value"`)
+	err := m.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for unknown operator")
+	}
+}
+
+func TestUnmarshalCaddyfile_ContainsMissingValue(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body contains`)
+	err := m.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for missing contains value")
+	}
+}
+
+func TestUnmarshalCaddyfile_JSONMissingPath(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body json`)
+	err := m.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for missing json dot-path")
+	}
+}
+
+func TestUnmarshalCaddyfile_JSONMissingValue(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body json .user.role`)
+	err := m.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for missing json value")
+	}
+}
+
+func TestUnmarshalCaddyfile_FormMissingField(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body form`)
+	err := m.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for missing form field name")
+	}
+}
+
+func TestUnmarshalCaddyfile_FormMissingValue(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body form username`)
+	err := m.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for missing form value")
+	}
+}
+
+func TestUnmarshalCaddyfile_BlockMaxSizeMissingValue(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body {
+	max_size
+}`)
+	err := m.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for max_size without value")
+	}
+}
+
+func TestUnmarshalCaddyfile_BlockMaxSizeInvalid(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body {
+	max_size notanumber
+	contains "test"
+}`)
+	err := m.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for invalid max_size")
+	}
+}
+
+func TestUnmarshalCaddyfile_BlockUnknownDirective(t *testing.T) {
+	m := &MatchBody{}
+	d := caddyfile.NewTestDispenser(`body {
+	bogus "test"
+}`)
+	err := m.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for unknown block directive")
+	}
+}
+
+// --- BodyVars Caddyfile Tests ---
+
+func TestBodyVarsUnmarshalCaddyfile_InlineJSON(t *testing.T) {
+	bv := &BodyVars{}
+	d := caddyfile.NewTestDispenser(`body_vars json .user.api_key`)
+	err := bv.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(bv.JSONPaths) != 1 || bv.JSONPaths[0] != ".user.api_key" {
+		t.Errorf("expected JSONPaths = [.user.api_key], got %v", bv.JSONPaths)
+	}
+}
+
+func TestBodyVarsUnmarshalCaddyfile_InlineForm(t *testing.T) {
+	bv := &BodyVars{}
+	d := caddyfile.NewTestDispenser(`body_vars form action`)
+	err := bv.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(bv.FormFields) != 1 || bv.FormFields[0] != "action" {
+		t.Errorf("expected FormFields = [action], got %v", bv.FormFields)
+	}
+}
+
+func TestBodyVarsUnmarshalCaddyfile_Block(t *testing.T) {
+	bv := &BodyVars{}
+	d := caddyfile.NewTestDispenser(`body_vars {
+	json .user.api_key
+	json .tenant.id
+	form action
+	form token
+	max_size 1mb
+}`)
+	err := bv.UnmarshalCaddyfile(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(bv.JSONPaths) != 2 {
+		t.Errorf("expected 2 JSONPaths, got %d", len(bv.JSONPaths))
+	}
+	if len(bv.FormFields) != 2 {
+		t.Errorf("expected 2 FormFields, got %d", len(bv.FormFields))
+	}
+	if bv.MaxSize != 1024*1024 {
+		t.Errorf("expected MaxSize = %d, got %d", 1024*1024, bv.MaxSize)
+	}
+}
+
+func TestBodyVarsUnmarshalCaddyfile_UnknownType(t *testing.T) {
+	bv := &BodyVars{}
+	d := caddyfile.NewTestDispenser(`body_vars xml .user`)
+	err := bv.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for unknown body_vars field type")
+	}
+}
+
+func TestBodyVarsUnmarshalCaddyfile_JSONMissingPath(t *testing.T) {
+	bv := &BodyVars{}
+	d := caddyfile.NewTestDispenser(`body_vars json`)
+	err := bv.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for missing json dot-path")
+	}
+}
+
+func TestBodyVarsUnmarshalCaddyfile_FormMissingField(t *testing.T) {
+	bv := &BodyVars{}
+	d := caddyfile.NewTestDispenser(`body_vars form`)
+	err := bv.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for missing form field name")
+	}
+}
+
+func TestBodyVarsUnmarshalCaddyfile_BlockUnknownDirective(t *testing.T) {
+	bv := &BodyVars{}
+	d := caddyfile.NewTestDispenser(`body_vars {
+	xml .user
+}`)
+	err := bv.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for unknown block directive")
+	}
+}
+
+func TestBodyVarsUnmarshalCaddyfile_BlockMaxSizeInvalid(t *testing.T) {
+	bv := &BodyVars{}
+	d := caddyfile.NewTestDispenser(`body_vars {
+	max_size notanumber
+	json .user
+}`)
+	err := bv.UnmarshalCaddyfile(d)
+	if err == nil {
+		t.Error("expected error for invalid max_size")
+	}
+}
+
+// --- parseSize additional tests ---
+
+func TestParseSize_NegativeValue(t *testing.T) {
+	_, err := parseSize("-5mb")
+	if err == nil {
+		t.Error("expected error for negative size")
+	}
+}
+
+func TestParseSize_KiB(t *testing.T) {
+	got, err := parseSize("2kib")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 2*1024 {
+		t.Errorf("expected %d, got %d", 2*1024, got)
+	}
+}
+
+func TestParseSize_MiB(t *testing.T) {
+	got, err := parseSize("3mib")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 3*1024*1024 {
+		t.Errorf("expected %d, got %d", 3*1024*1024, got)
+	}
+}
+
+func TestParseSize_GiB(t *testing.T) {
+	got, err := parseSize("1gib")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 1024*1024*1024 {
+		t.Errorf("expected %d, got %d", 1024*1024*1024, got)
+	}
+}
+
+// ─── Concurrency / Race Test ────────────────────────────────────────
+
+func TestMatch_ConcurrentAccess(t *testing.T) {
+	m := &MatchBody{Contains: "needle"}
+	mustProvision(t, m)
+
+	const goroutines = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			r := newRequest("haystack with needle inside")
+			if !m.Match(r) {
+				t.Error("expected match")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestMatch_ConcurrentRegex(t *testing.T) {
+	m := &MatchBody{Regex: `"role"\s*:\s*"admin"`}
+	mustProvision(t, m)
+
+	const goroutines = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			r := newRequest(`{"role": "admin", "name": "test"}`)
+			if !m.Match(r) {
+				t.Error("expected regex match")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestMatch_ConcurrentJSON(t *testing.T) {
+	m := &MatchBody{JSONPath: ".user.role", JSONOp: "eq", JSONValue: "admin"}
+	mustProvision(t, m)
+
+	const goroutines = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			r := newRequest(`{"user":{"role":"admin"}}`)
+			if !m.Match(r) {
+				t.Error("expected JSON match")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// ─── resolveJSONPathFromRoot tests ──────────────────────────────────
+
+func TestResolveJSONPathFromRoot(t *testing.T) {
+	root := map[string]interface{}{
+		"user": map[string]interface{}{
+			"role": "admin",
+			"tags": []interface{}{"a", "b"},
+		},
+		"count": float64(42),
+	}
+
+	tests := []struct {
+		path    string
+		wantVal string
+		wantOK  bool
+	}{
+		{".user.role", "admin", true},
+		{"user.role", "admin", true},
+		{".count", "42", true},
+		{".user.tags.0", "a", true},
+		{".missing", "", false},
+		{".", "", true}, // root
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			val, ok := resolveJSONPathFromRoot(root, tt.path)
+			if ok != tt.wantOK {
+				t.Errorf("resolveJSONPathFromRoot(%q): ok = %v, want %v", tt.path, ok, tt.wantOK)
+				return
+			}
+			if ok && tt.path != "." {
+				str := jsonValueToString(val)
+				if str != tt.wantVal {
+					t.Errorf("resolveJSONPathFromRoot(%q) = %q, want %q", tt.path, str, tt.wantVal)
+				}
+			}
+		})
 	}
 }

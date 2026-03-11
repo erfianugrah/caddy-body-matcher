@@ -86,7 +86,7 @@ body_vars form action
 # Use extracted values as rate limit keys
 body_vars json .user.api_key
 rate_limit {
-    key {http.vars.body_json..user.api_key}
+    key {http.vars.body_json.user.api_key}
     events 100
     window 1m
 }

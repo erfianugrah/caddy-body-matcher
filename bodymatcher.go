@@ -127,7 +127,7 @@ func (m *MatchBody) Provision(ctx caddy.Context) error {
 	if m.Regex != "" {
 		re, err := regexp.Compile(m.Regex)
 		if err != nil {
-			return fmt.Errorf("compiling body regex: %v", err)
+			return fmt.Errorf("compiling body regex: %w", err)
 		}
 		m.compiledRegex = re
 	}
@@ -136,7 +136,7 @@ func (m *MatchBody) Provision(ctx caddy.Context) error {
 	if m.JSONOp == "regex" && m.JSONValue != "" {
 		re, err := regexp.Compile(m.JSONValue)
 		if err != nil {
-			return fmt.Errorf("compiling json_regex pattern: %v", err)
+			return fmt.Errorf("compiling json_regex pattern: %w", err)
 		}
 		m.compiledJSONRegex = re
 	}
@@ -145,7 +145,7 @@ func (m *MatchBody) Provision(ctx caddy.Context) error {
 	if m.FormOp == "regex" && m.FormValue != "" {
 		re, err := regexp.Compile(m.FormValue)
 		if err != nil {
-			return fmt.Errorf("compiling form_regex pattern: %v", err)
+			return fmt.Errorf("compiling form_regex pattern: %w", err)
 		}
 		m.compiledFormRegex = re
 	}
@@ -273,34 +273,15 @@ func (m MatchBody) Match(r *http.Request) bool {
 // readBody reads the request body up to MaxSize, then replaces r.Body
 // with a new reader so downstream handlers can still read it.
 func (m MatchBody) readBody(r *http.Request) ([]byte, error) {
-	// Limit reading to MaxSize + 1 to detect overflow
-	lr := io.LimitReader(r.Body, m.MaxSize+1)
-	buf, err := io.ReadAll(lr)
-	if err != nil {
-		// Re-wrap whatever we got so downstream doesn't get a broken body
-		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buf), r.Body))
-		return nil, err
-	}
-
-	// If we read more than MaxSize, truncate to MaxSize for matching
-	// but preserve the full body for downstream
-	if int64(len(buf)) > m.MaxSize {
-		// Body was larger; re-assemble original body for downstream
-		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buf), r.Body))
-		buf = buf[:m.MaxSize]
-	} else {
-		// Body fully read; replace with buffered copy
-		r.Body = io.NopCloser(bytes.NewReader(buf))
-	}
-
-	return buf, nil
+	return readRequestBody(r, m.MaxSize)
 }
 
 // matchJSON parses the body as JSON and matches a field by dot-path.
 func (m MatchBody) matchJSON(body []byte) bool {
 	val, ok := resolveJSONPath(body, m.JSONPath)
 	if !ok {
-		return m.JSONOp == "exists" && false // field not found
+		// Field not found — no match, even for "exists"
+		return false
 	}
 
 	if m.JSONOp == "exists" {
@@ -323,14 +304,21 @@ func (m MatchBody) matchJSON(body []byte) bool {
 	return false
 }
 
-// resolveJSONPath walks a dot-path like ".user.roles.0" through parsed JSON.
-// Leading dot is optional. Returns (value, found).
+// resolveJSONPath unmarshals body as JSON and walks a dot-path like
+// ".user.roles.0" through the result. Leading dot is optional.
+// Returns (value, found). This is a convenience wrapper around
+// resolveJSONPathFromRoot for callers that have raw bytes.
 func resolveJSONPath(body []byte, dotPath string) (interface{}, bool) {
 	var root interface{}
 	if err := json.Unmarshal(body, &root); err != nil {
 		return nil, false
 	}
+	return resolveJSONPathFromRoot(root, dotPath)
+}
 
+// resolveJSONPathFromRoot walks a dot-path like ".user.roles.0" through
+// an already-parsed JSON value. Leading dot is optional. Returns (value, found).
+func resolveJSONPathFromRoot(root interface{}, dotPath string) (interface{}, bool) {
 	// Trim leading dot
 	dotPath = strings.TrimPrefix(dotPath, ".")
 	if dotPath == "" {
@@ -588,15 +576,24 @@ func parseSize(s string) (int64, error) {
 	s = strings.TrimSpace(strings.ToLower(s))
 	multiplier := int64(1)
 
-	if strings.HasSuffix(s, "gb") || strings.HasSuffix(s, "gib") {
+	if strings.HasSuffix(s, "gib") {
 		multiplier = 1024 * 1024 * 1024
-		s = strings.TrimRight(s, "gib")
-	} else if strings.HasSuffix(s, "mb") || strings.HasSuffix(s, "mib") {
+		s = strings.TrimSuffix(s, "gib")
+	} else if strings.HasSuffix(s, "gb") {
+		multiplier = 1024 * 1024 * 1024
+		s = strings.TrimSuffix(s, "gb")
+	} else if strings.HasSuffix(s, "mib") {
 		multiplier = 1024 * 1024
-		s = strings.TrimRight(s, "mib")
-	} else if strings.HasSuffix(s, "kb") || strings.HasSuffix(s, "kib") {
+		s = strings.TrimSuffix(s, "mib")
+	} else if strings.HasSuffix(s, "mb") {
+		multiplier = 1024 * 1024
+		s = strings.TrimSuffix(s, "mb")
+	} else if strings.HasSuffix(s, "kib") {
 		multiplier = 1024
-		s = strings.TrimRight(s, "kib")
+		s = strings.TrimSuffix(s, "kib")
+	} else if strings.HasSuffix(s, "kb") {
+		multiplier = 1024
+		s = strings.TrimSuffix(s, "kb")
 	} else if strings.HasSuffix(s, "b") {
 		s = strings.TrimSuffix(s, "b")
 	}
@@ -604,6 +601,9 @@ func parseSize(s string) (int64, error) {
 	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid size value %q", s)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("size must be non-negative, got %d", n)
 	}
 	return n * multiplier, nil
 }
@@ -695,12 +695,12 @@ func (bv BodyVars) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 		return next.ServeHTTP(w, r)
 	}
 
-	// Extract JSON fields
+	// Extract JSON fields — parse once, resolve each path from the parsed root
 	if len(bv.JSONPaths) > 0 && len(buf) > 0 {
 		var root interface{}
 		if err := json.Unmarshal(buf, &root); err == nil {
 			for _, dotPath := range bv.JSONPaths {
-				val, ok := resolveJSONPath(buf, dotPath)
+				val, ok := resolveJSONPathFromRoot(root, dotPath)
 				if ok {
 					strVal := jsonValueToString(val)
 					// Normalize path: strip leading dot for variable name
@@ -730,17 +730,30 @@ func (bv BodyVars) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 // readBody reads the request body up to MaxSize, then replaces r.Body
 // with a new reader so downstream handlers can still read it.
 func (bv BodyVars) readBody(r *http.Request) ([]byte, error) {
-	lr := io.LimitReader(r.Body, bv.MaxSize+1)
+	return readRequestBody(r, bv.MaxSize)
+}
+
+// readRequestBody reads the request body up to maxSize bytes, then replaces
+// r.Body with a new reader so downstream handlers can still read the full
+// original body. If the body exceeds maxSize, the returned buffer is truncated
+// to maxSize but the full body is preserved for downstream.
+func readRequestBody(r *http.Request, maxSize int64) ([]byte, error) {
+	// Limit reading to maxSize + 1 to detect overflow
+	lr := io.LimitReader(r.Body, maxSize+1)
 	buf, err := io.ReadAll(lr)
 	if err != nil {
+		// Re-wrap whatever we got so downstream doesn't get a broken body
 		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buf), r.Body))
 		return nil, err
 	}
 
-	if int64(len(buf)) > bv.MaxSize {
+	// If we read more than maxSize, truncate for processing
+	// but preserve the full body for downstream
+	if int64(len(buf)) > maxSize {
 		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buf), r.Body))
-		buf = buf[:bv.MaxSize]
+		buf = buf[:maxSize]
 	} else {
+		// Body fully read; replace with buffered copy
 		r.Body = io.NopCloser(bytes.NewReader(buf))
 	}
 
