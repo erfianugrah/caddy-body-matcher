@@ -33,6 +33,13 @@ func init() {
 // Matches the Coraza WAF request_body_limit of 13 MiB.
 const defaultMaxSize = 13 * 1024 * 1024 // 13 MiB
 
+// maxAllowedSize is the absolute upper bound for MaxSize.
+// Prevents accidental OOM from configs like "max_size 1tb".
+const maxAllowedSize = 256 * 1024 * 1024 // 256 MiB
+
+// maxRegexLen limits regex pattern length to bound matching cost.
+const maxRegexLen = 4096
+
 // MatchBody matches requests by inspecting the request body.
 // Only one match type may be specified per matcher instance.
 //
@@ -104,6 +111,12 @@ type MatchBody struct {
 	compiledJSONRegex *regexp.Regexp
 	compiledFormRegex *regexp.Regexp
 
+	// pre-converted byte slices for zero-alloc matching (set during Provision)
+	containsBytes   []byte
+	equalsBytes     []byte
+	startsWithBytes []byte
+	endsWithBytes   []byte
+
 	logger *zap.Logger
 }
 
@@ -125,6 +138,9 @@ func (m *MatchBody) Provision(ctx caddy.Context) error {
 
 	// Compile raw body regex
 	if m.Regex != "" {
+		if len(m.Regex) > maxRegexLen {
+			return fmt.Errorf("body regex pattern too long (%d bytes, max %d)", len(m.Regex), maxRegexLen)
+		}
 		re, err := regexp.Compile(m.Regex)
 		if err != nil {
 			return fmt.Errorf("compiling body regex: %w", err)
@@ -134,6 +150,9 @@ func (m *MatchBody) Provision(ctx caddy.Context) error {
 
 	// Compile JSON field regex
 	if m.JSONOp == "regex" && m.JSONValue != "" {
+		if len(m.JSONValue) > maxRegexLen {
+			return fmt.Errorf("json_regex pattern too long (%d bytes, max %d)", len(m.JSONValue), maxRegexLen)
+		}
 		re, err := regexp.Compile(m.JSONValue)
 		if err != nil {
 			return fmt.Errorf("compiling json_regex pattern: %w", err)
@@ -143,11 +162,28 @@ func (m *MatchBody) Provision(ctx caddy.Context) error {
 
 	// Compile form field regex
 	if m.FormOp == "regex" && m.FormValue != "" {
+		if len(m.FormValue) > maxRegexLen {
+			return fmt.Errorf("form_regex pattern too long (%d bytes, max %d)", len(m.FormValue), maxRegexLen)
+		}
 		re, err := regexp.Compile(m.FormValue)
 		if err != nil {
 			return fmt.Errorf("compiling form_regex pattern: %w", err)
 		}
 		m.compiledFormRegex = re
+	}
+
+	// Pre-convert string match values to []byte for zero-alloc matching
+	if m.Contains != "" {
+		m.containsBytes = []byte(m.Contains)
+	}
+	if m.Equals != "" {
+		m.equalsBytes = []byte(m.Equals)
+	}
+	if m.StartsWith != "" {
+		m.startsWithBytes = []byte(m.StartsWith)
+	}
+	if m.EndsWith != "" {
+		m.endsWithBytes = []byte(m.EndsWith)
 	}
 
 	return nil
@@ -157,6 +193,9 @@ func (m *MatchBody) Provision(ctx caddy.Context) error {
 func (m *MatchBody) Validate() error {
 	if m.MaxSize < 0 {
 		return fmt.Errorf("max_size must be non-negative")
+	}
+	if m.MaxSize > maxAllowedSize {
+		return fmt.Errorf("max_size %d exceeds maximum allowed %d (256 MiB)", m.MaxSize, maxAllowedSize)
 	}
 
 	// Count how many match types are configured
@@ -230,20 +269,17 @@ func (m MatchBody) Match(r *http.Request) bool {
 	}
 
 	// Read body up to max_size
-	buf, err := m.readBody(r)
+	result, err := m.readBody(r)
 	if err != nil {
 		if m.logger != nil {
 			m.logger.Debug("failed to read request body", zap.Error(err))
 		}
 		return false
 	}
+	buf := result.buf
 
-	// If body exceeds max_size, don't match
-	if int64(len(buf)) >= m.MaxSize {
-		// We read exactly MaxSize bytes; body may be larger. We still
-		// attempt to match against what we have, since the user set a
-		// limit knowing this. Only "eq" is not meaningful on truncated
-		// bodies, so we skip it.
+	// If body was truncated, "eq" is not meaningful
+	if result.truncated {
 		if m.Equals != "" {
 			return false
 		}
@@ -252,14 +288,14 @@ func (m MatchBody) Match(r *http.Request) bool {
 	// Dispatch to the appropriate match function
 	switch {
 	case m.Contains != "":
-		return bytes.Contains(buf, []byte(m.Contains))
+		return bytes.Contains(buf, m.containsBytes)
 	case m.Equals != "":
-		return bytes.Equal(buf, []byte(m.Equals))
+		return bytes.Equal(buf, m.equalsBytes)
 	case m.StartsWith != "":
-		return bytes.HasPrefix(buf, []byte(m.StartsWith))
+		return bytes.HasPrefix(buf, m.startsWithBytes)
 	case m.EndsWith != "":
-		return bytes.HasSuffix(buf, []byte(m.EndsWith))
-	case m.Regex != "":
+		return bytes.HasSuffix(buf, m.endsWithBytes)
+	case m.Regex != "" && m.compiledRegex != nil:
 		return m.compiledRegex.Match(buf)
 	case m.JSONPath != "":
 		return m.matchJSON(buf)
@@ -272,7 +308,7 @@ func (m MatchBody) Match(r *http.Request) bool {
 
 // readBody reads the request body up to MaxSize, then replaces r.Body
 // with a new reader so downstream handlers can still read it.
-func (m MatchBody) readBody(r *http.Request) ([]byte, error) {
+func (m MatchBody) readBody(r *http.Request) (bodyReadResult, error) {
 	return readRequestBody(r, m.MaxSize)
 }
 
@@ -479,26 +515,41 @@ func (m *MatchBody) parseOperator(d *caddyfile.Dispenser, op string) error {
 			return d.Errf("body contains requires a value")
 		}
 		m.Contains = d.Val()
+		if d.NextArg() {
+			return d.Errf("unexpected argument after contains value: %s", d.Val())
+		}
 	case "eq":
 		if !d.NextArg() {
 			return d.Errf("body eq requires a value")
 		}
 		m.Equals = d.Val()
+		if d.NextArg() {
+			return d.Errf("unexpected argument after eq value: %s", d.Val())
+		}
 	case "starts_with":
 		if !d.NextArg() {
 			return d.Errf("body starts_with requires a value")
 		}
 		m.StartsWith = d.Val()
+		if d.NextArg() {
+			return d.Errf("unexpected argument after starts_with value: %s", d.Val())
+		}
 	case "ends_with":
 		if !d.NextArg() {
 			return d.Errf("body ends_with requires a value")
 		}
 		m.EndsWith = d.Val()
+		if d.NextArg() {
+			return d.Errf("unexpected argument after ends_with value: %s", d.Val())
+		}
 	case "regex":
 		if !d.NextArg() {
 			return d.Errf("body regex requires a pattern")
 		}
 		m.Regex = d.Val()
+		if d.NextArg() {
+			return d.Errf("unexpected argument after regex pattern: %s", d.Val())
+		}
 	case "json":
 		if !d.NextArg() {
 			return d.Errf("body json requires a dot-path")
@@ -672,6 +723,9 @@ func (bv *BodyVars) Validate() error {
 	if bv.MaxSize < 0 {
 		return fmt.Errorf("max_size must be non-negative")
 	}
+	if bv.MaxSize > maxAllowedSize {
+		return fmt.Errorf("max_size %d exceeds maximum allowed %d (256 MiB)", bv.MaxSize, maxAllowedSize)
+	}
 	if len(bv.JSONPaths) == 0 && len(bv.FormFields) == 0 {
 		return fmt.Errorf("body_vars requires at least one json or form field to extract")
 	}
@@ -687,12 +741,18 @@ func (bv BodyVars) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 	}
 
 	// Read body up to max_size
-	buf, err := bv.readBody(r)
+	result, err := bv.readBody(r)
 	if err != nil {
 		if bv.logger != nil {
 			bv.logger.Debug("body_vars: failed to read request body", zap.Error(err))
 		}
 		return next.ServeHTTP(w, r)
+	}
+	buf := result.buf
+
+	// Detect body truncation and set sentinel variable
+	if result.truncated {
+		caddyhttp.SetVar(r.Context(), "body_json._truncated", "true")
 	}
 
 	// Extract JSON fields — parse once, resolve each path from the parsed root
@@ -708,6 +768,11 @@ func (bv BodyVars) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 					caddyhttp.SetVar(r.Context(), varName, strVal)
 				}
 			}
+		} else if result.truncated && bv.logger != nil {
+			bv.logger.Warn("body_vars: JSON parse failed on truncated body (exceeded max_size); "+
+				"body_json.* variables will not be set — downstream rate-limit keys may resolve to empty",
+				zap.Int64("max_size", bv.MaxSize),
+				zap.Int("buf_len", len(buf)))
 		}
 	}
 
@@ -729,35 +794,40 @@ func (bv BodyVars) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 
 // readBody reads the request body up to MaxSize, then replaces r.Body
 // with a new reader so downstream handlers can still read it.
-func (bv BodyVars) readBody(r *http.Request) ([]byte, error) {
+func (bv BodyVars) readBody(r *http.Request) (bodyReadResult, error) {
 	return readRequestBody(r, bv.MaxSize)
+}
+
+// bodyReadResult holds the result of reading a request body.
+type bodyReadResult struct {
+	buf       []byte
+	truncated bool
 }
 
 // readRequestBody reads the request body up to maxSize bytes, then replaces
 // r.Body with a new reader so downstream handlers can still read the full
 // original body. If the body exceeds maxSize, the returned buffer is truncated
 // to maxSize but the full body is preserved for downstream.
-func readRequestBody(r *http.Request, maxSize int64) ([]byte, error) {
+func readRequestBody(r *http.Request, maxSize int64) (bodyReadResult, error) {
 	// Limit reading to maxSize + 1 to detect overflow
 	lr := io.LimitReader(r.Body, maxSize+1)
 	buf, err := io.ReadAll(lr)
 	if err != nil {
 		// Re-wrap whatever we got so downstream doesn't get a broken body
 		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buf), r.Body))
-		return nil, err
+		return bodyReadResult{}, err
 	}
 
 	// If we read more than maxSize, truncate for processing
 	// but preserve the full body for downstream
 	if int64(len(buf)) > maxSize {
 		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buf), r.Body))
-		buf = buf[:maxSize]
-	} else {
-		// Body fully read; replace with buffered copy
-		r.Body = io.NopCloser(bytes.NewReader(buf))
+		return bodyReadResult{buf: buf[:maxSize], truncated: true}, nil
 	}
 
-	return buf, nil
+	// Body fully read; replace with buffered copy
+	r.Body = io.NopCloser(bytes.NewReader(buf))
+	return bodyReadResult{buf: buf, truncated: false}, nil
 }
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
