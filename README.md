@@ -99,6 +99,17 @@ rate_limit {
 - **JSON path resolution** — dot-notation via `encoding/json`, supports array indices as numeric segments (e.g., `.items.0.type`)
 - **No content-type filtering** — scoping by content-type is done via other Caddy matchers
 
+## Security
+
+v0.2.0 includes a comprehensive security audit (March 2026):
+- Regex pattern size limits (4096 bytes max)
+- MaxSize upper bound (256 MiB) prevents OOM
+- Body truncation detection via explicit `bodyReadResult.truncated` flag
+- Truncation sentinel variable (`body_json._truncated`) for downstream rules
+- JSON precision preserved via `json.Number` (no float64 loss for large integers)
+- Caddyfile parser rejects unexpected trailing arguments
+- Pre-converted byte slices eliminate per-request allocations
+
 ## License
 
 MIT
