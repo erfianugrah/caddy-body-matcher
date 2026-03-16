@@ -14,6 +14,8 @@ detected.
 
 ### 1. Rate-limit key vanishes on oversized body (ecosystem bypass)
 
+**Status: FIXED** — Warn log on truncated JSON parse + `body_json._truncated` sentinel variable set in BodyVars.ServeHTTP. Policy engine also fixed to fall back to client IP on empty rate-limit key.
+
 **File:** `bodymatcher.go:699-711`
 
 When the request body exceeds `MaxSize`, `readRequestBody` returns a
@@ -66,6 +68,8 @@ if len(bv.JSONPaths) > 0 && len(buf) > 0 {
 
 ### 2. No regex pattern size limit
 
+**Status: FIXED** — `maxRegexLen = 4096` constant added; Provision() rejects patterns exceeding this limit for body regex, json_regex, and form_regex.
+
 **File:** `bodymatcher.go:128`, `137`, `146`
 
 `regexp.Compile()` accepts arbitrary patterns from Caddyfile config or
@@ -97,6 +101,8 @@ In this stack, regex patterns can originate from:
 
 ### 3. MaxSize=0 silently becomes 13 MiB — no way to express "zero"
 
+**Status: OPEN** — Retained current behavior (zero → default). Explicit zero is a nonsensical config value; the upper bound fix (#5) addresses the OOM risk.
+
 **File:** `bodymatcher.go:122-124`, `664-666`
 
 `Provision()` treats `MaxSize == 0` as "not set" and overwrites it with
@@ -124,6 +130,8 @@ explicit zero is indistinguishable from unset.
 ---
 
 ### 4. Truncation detection is coupled to buffer length — fragile
+
+**Status: FIXED** — `readRequestBody` now returns `bodyReadResult` struct with explicit `truncated bool` flag, decoupling callers from buffer-length arithmetic.
 
 **File:** `bodymatcher.go:242`, `752-754`
 
@@ -163,6 +171,8 @@ buffer-length arithmetic.
 
 ### 5. No MaxSize upper bound — unbounded heap allocation
 
+**Status: FIXED** — `maxAllowedSize = 256 MiB` constant; Validate() rejects MaxSize exceeding this for both MatchBody and BodyVars.
+
 **File:** `bodymatcher.go:158`, `671`
 
 `Validate()` rejects negative `MaxSize` but has no ceiling. A config of
@@ -193,6 +203,8 @@ malicious OOM. 256 MiB or even 64 MiB is likely sufficient. The default
 ## Medium
 
 ### 6. Per-request `[]byte` allocations from string fields
+
+**Status: FIXED** — String match values pre-converted to `[]byte` during Provision() and stored as `containsBytes`, `equalsBytes`, `startsWithBytes`, `endsWithBytes` fields.
 
 **File:** `bodymatcher.go:255-261`
 
@@ -245,6 +257,8 @@ Zero per-request allocations for the match comparison.
 
 ### 7. Caddyfile parser silently ignores trailing arguments
 
+**Status: FIXED** — All single-value operators (contains, eq, starts_with, ends_with, regex) now reject unexpected trailing arguments.
+
 **File:** `bodymatcher.go:478-501`
 
 After parsing an operator's required arguments, the parser does not check
@@ -284,6 +298,8 @@ Apply to all operator cases in `parseOperator()`.
 
 ### 8. Form and JSON matching are Content-Type blind (by design)
 
+**Status: OPEN** — By design; documentation improvement only.
+
 **File:** `bodymatcher.go:380`, `311`
 
 Both `matchForm()` and `matchJSON()` parse the body without checking
@@ -313,6 +329,8 @@ positives:
 
 ### 9. `parseSize` treats GB/MB/KB as binary (1024-based)
 
+**Status: OPEN** — Low priority; unlikely to cause real issues.
+
 **File:** `bodymatcher.go:582-596`
 
 `gb` maps to `1024^3` (GiB), `mb` maps to `1024^2` (MiB), `kb` maps to
@@ -336,6 +354,8 @@ practice.
 ---
 
 ### 10. No test for `MaxSize=0` behavior
+
+**Status: OPEN** — Deferred; current behavior (zero → default) is documented and validated by #5.
 
 There is no test that sets `MaxSize: 0` in a JSON config (bypassing
 Caddyfile parsing) and verifies the resulting behavior. Given issue #3
@@ -363,6 +383,8 @@ This documents the current behavior even if it's not the desired behavior.
 
 ### 11. No concurrent test for `BodyVars.ServeHTTP`
 
+**Status: OPEN** — Low priority; requests are not shared across goroutines in real Caddy usage.
+
 Concurrency tests exist for `MatchBody.Match()` (3 tests with 50
 goroutines each) but not for `BodyVars.ServeHTTP()`. Since `ServeHTTP`
 uses a value receiver and doesn't mutate shared state, it's likely safe,
@@ -377,6 +399,8 @@ real Caddy usage.
 ---
 
 ### 12. `jsonValueToString` loses precision on large integers
+
+**Status: OPEN** — Low priority; requires API change to json.Decoder with UseNumber().
 
 **File:** `bodymatcher.go:358-362`
 
@@ -418,10 +442,18 @@ values, not large integers.
 
 ### 13. No test for deeply nested JSON paths
 
+**Status: OPEN** — Low priority; config-time only, not exploitable at runtime.
+
 `resolveJSONPathFromRoot` iterates over `strings.Split(dotPath, ".")`
 segments. A malicious config with a very deep path (e.g., 10,000 dot
 segments) would iterate 10,000 times. This is config-time only and not
 exploitable at runtime, but a test would document the behavior.
+
+---
+
+### Additional Fix: `compiledRegex` nil guard
+
+**Status: FIXED** — Nil guard added to `compiledRegex` check in `Match()` (now uses `m.Regex != "" && m.compiledRegex != nil`) for consistency with `compiledJSONRegex` and `compiledFormRegex`. (Identified in caddy-compose FIXES.md L-2.)
 
 ---
 
