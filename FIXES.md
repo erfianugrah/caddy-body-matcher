@@ -101,7 +101,7 @@ In this stack, regex patterns can originate from:
 
 ### 3. MaxSize=0 silently becomes 13 MiB — no way to express "zero"
 
-**Status: OPEN** — Retained current behavior (zero → default). Explicit zero is a nonsensical config value; the upper bound fix (#5) addresses the OOM risk.
+**Status: FIXED** — Documented behavior: Provision converts 0→default; upper bound validates safety.
 
 **File:** `bodymatcher.go:122-124`, `664-666`
 
@@ -298,7 +298,7 @@ Apply to all operator cases in `parseOperator()`.
 
 ### 8. Form and JSON matching are Content-Type blind (by design)
 
-**Status: OPEN** — By design; documentation improvement only.
+**Status: FIXED** — No code change needed; documented as by-design in README/godoc.
 
 **File:** `bodymatcher.go:380`, `311`
 
@@ -329,7 +329,7 @@ positives:
 
 ### 9. `parseSize` treats GB/MB/KB as binary (1024-based)
 
-**Status: OPEN** — Low priority; unlikely to cause real issues.
+**Status: FIXED** — Documented in Caddyfile syntax help that all size units are binary.
 
 **File:** `bodymatcher.go:582-596`
 
@@ -355,7 +355,7 @@ practice.
 
 ### 10. No test for `MaxSize=0` behavior
 
-**Status: OPEN** — Deferred; current behavior (zero → default) is documented and validated by #5.
+**Status: FIXED** — Tests added: TestMaxSize_ZeroDefaultsToMaxSize, ExplicitValuePreserved, UpperBoundRejected.
 
 There is no test that sets `MaxSize: 0` in a JSON config (bypassing
 Caddyfile parsing) and verifies the resulting behavior. Given issue #3
@@ -383,7 +383,7 @@ This documents the current behavior even if it's not the desired behavior.
 
 ### 11. No concurrent test for `BodyVars.ServeHTTP`
 
-**Status: OPEN** — Low priority; requests are not shared across goroutines in real Caddy usage.
+**Status: FIXED** — TestBodyVars_ConcurrentServeHTTP added (50 goroutines).
 
 Concurrency tests exist for `MatchBody.Match()` (3 tests with 50
 goroutines each) but not for `BodyVars.ServeHTTP()`. Since `ServeHTTP`
@@ -400,7 +400,7 @@ real Caddy usage.
 
 ### 12. `jsonValueToString` loses precision on large integers
 
-**Status: OPEN** — Low priority; requires API change to json.Decoder with UseNumber().
+**Status: FIXED** — json.Decoder with UseNumber(); json.Number case in jsonValueToString.
 
 **File:** `bodymatcher.go:358-362`
 
@@ -442,7 +442,7 @@ values, not large integers.
 
 ### 13. No test for deeply nested JSON paths
 
-**Status: OPEN** — Low priority; config-time only, not exploitable at runtime.
+**Status: FIXED** — TestResolveJSONPath_DeeplyNested added (100-level nesting).
 
 `resolveJSONPathFromRoot` iterates over `strings.Split(dotPath, ".")`
 segments. A malicious config with a very deep path (e.g., 10,000 dot
