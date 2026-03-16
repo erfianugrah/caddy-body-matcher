@@ -3,6 +3,7 @@ package bodymatcher
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1549,5 +1550,140 @@ func TestResolveJSONPathFromRoot(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ─── Fix #10: MaxSize=0 Behavior Tests ─────────────────────────────
+
+func TestMaxSize_ZeroDefaultsToMaxSize(t *testing.T) {
+	m := &MatchBody{Contains: "test", MaxSize: 0}
+	ctx, cancel := testContext()
+	defer cancel()
+	if err := m.Provision(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if m.MaxSize != defaultMaxSize {
+		t.Errorf("expected MaxSize=0 to default to %d, got %d", defaultMaxSize, m.MaxSize)
+	}
+}
+
+func TestMaxSize_ExplicitValuePreserved(t *testing.T) {
+	m := &MatchBody{Contains: "test", MaxSize: 1024}
+	ctx, cancel := testContext()
+	defer cancel()
+	if err := m.Provision(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if m.MaxSize != 1024 {
+		t.Errorf("expected MaxSize=1024 to be preserved, got %d", m.MaxSize)
+	}
+}
+
+func TestMaxSize_UpperBoundRejected(t *testing.T) {
+	m := &MatchBody{Contains: "test", MaxSize: 512 * 1024 * 1024} // 512 MiB
+	ctx, cancel := testContext()
+	defer cancel()
+	if err := m.Provision(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Validate(); err == nil {
+		t.Error("expected Validate to reject MaxSize > 256 MiB")
+	}
+}
+
+// ─── Fix #11: Concurrent BodyVars Test ─────────────────────────────
+
+func TestBodyVars_ConcurrentServeHTTP(t *testing.T) {
+	bv := &BodyVars{JSONPaths: []string{".user.role"}}
+	mustProvisionBodyVars(t, bv)
+
+	const goroutines = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			r := newVarsRequest(`{"user":{"role":"admin"}}`)
+			w := httptest.NewRecorder()
+			err := bv.ServeHTTP(w, r, noopHandler{})
+			if err != nil {
+				t.Errorf("ServeHTTP error: %v", err)
+				return
+			}
+			got := caddyhttp.GetVar(r.Context(), "body_json.user.role")
+			if got != "admin" {
+				t.Errorf("expected body_json.user.role = %q, got %v", "admin", got)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// ─── Fix #12: json.Number Precision Tests ──────────────────────────
+
+func TestJSON_LargeIntegerPrecision(t *testing.T) {
+	// 2^53 + 1 = 9007199254740993 — loses precision with float64
+	m := &MatchBody{JSONPath: ".id", JSONOp: "eq", JSONValue: "9007199254740993"}
+	mustProvision(t, m)
+
+	if !m.Match(newRequest(`{"id":9007199254740993}`)) {
+		t.Error("expected large integer to match with json.Number precision")
+	}
+}
+
+func TestBodyVars_LargeIntegerPrecision(t *testing.T) {
+	bv := &BodyVars{JSONPaths: []string{".id"}}
+	mustProvisionBodyVars(t, bv)
+
+	r := newVarsRequest(`{"id":9007199254740993}`)
+	w := httptest.NewRecorder()
+	bv.ServeHTTP(w, r, noopHandler{})
+
+	got := caddyhttp.GetVar(r.Context(), "body_json.id")
+	if got != "9007199254740993" {
+		t.Errorf("expected body_json.id = %q, got %v", "9007199254740993", got)
+	}
+}
+
+func TestJsonValueToString_JSONNumber(t *testing.T) {
+	tests := []struct {
+		name string
+		val  interface{}
+		want string
+	}{
+		{"integer", json.Number("42"), "42"},
+		{"large int", json.Number("9007199254740993"), "9007199254740993"},
+		{"float", json.Number("3.14"), "3.14"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := jsonValueToString(tt.val)
+			if got != tt.want {
+				t.Errorf("jsonValueToString(%v) = %q, want %q", tt.val, got, tt.want)
+			}
+		})
+	}
+}
+
+// ─── Fix #13: Deeply Nested JSON Path Test ─────────────────────────
+
+func TestResolveJSONPath_DeeplyNested(t *testing.T) {
+	// Build a deeply nested JSON: {"a":{"a":{"a":...{"a":"deep"}}}}
+	depth := 100
+	jsonBody := strings.Repeat(`{"a":`, depth) + `"deep"` + strings.Repeat(`}`, depth)
+	path := strings.TrimSuffix(strings.Repeat("a.", depth), ".")
+
+	m := &MatchBody{JSONPath: "." + path, JSONOp: "eq", JSONValue: "deep", MaxSize: int64(len(jsonBody) + 100)}
+	ctx, cancel := testContext()
+	defer cancel()
+	if err := m.Provision(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newRequest(jsonBody)
+	if !m.Match(r) {
+		t.Error("expected deeply nested JSON path to match")
 	}
 }

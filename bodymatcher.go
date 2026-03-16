@@ -190,6 +190,9 @@ func (m *MatchBody) Provision(ctx caddy.Context) error {
 }
 
 // Validate ensures the matcher configuration is correct.
+// Note: MaxSize==0 is never seen here because Provision() (which runs first)
+// converts 0 → defaultMaxSize. An explicit "max_size": 0 in JSON config is
+// therefore treated as "use the default", which is intentional.
 func (m *MatchBody) Validate() error {
 	if m.MaxSize < 0 {
 		return fmt.Errorf("max_size must be non-negative")
@@ -345,8 +348,10 @@ func (m MatchBody) matchJSON(body []byte) bool {
 // Returns (value, found). This is a convenience wrapper around
 // resolveJSONPathFromRoot for callers that have raw bytes.
 func resolveJSONPath(body []byte, dotPath string) (interface{}, bool) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
 	var root interface{}
-	if err := json.Unmarshal(body, &root); err != nil {
+	if err := dec.Decode(&root); err != nil {
 		return nil, false
 	}
 	return resolveJSONPathFromRoot(root, dotPath)
@@ -391,6 +396,8 @@ func jsonValueToString(v interface{}) string {
 	switch val := v.(type) {
 	case string:
 		return val
+	case json.Number:
+		return val.String()
 	case float64:
 		if val == float64(int64(val)) {
 			return strconv.FormatInt(int64(val), 10)
@@ -757,8 +764,10 @@ func (bv BodyVars) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 
 	// Extract JSON fields — parse once, resolve each path from the parsed root
 	if len(bv.JSONPaths) > 0 && len(buf) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(buf))
+		dec.UseNumber()
 		var root interface{}
-		if err := json.Unmarshal(buf, &root); err == nil {
+		if err := dec.Decode(&root); err == nil {
 			for _, dotPath := range bv.JSONPaths {
 				val, ok := resolveJSONPathFromRoot(root, dotPath)
 				if ok {
