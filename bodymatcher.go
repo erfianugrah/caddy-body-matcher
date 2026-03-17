@@ -782,6 +782,10 @@ func (bv BodyVars) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 				"body_json.* variables will not be set — downstream rate-limit keys may resolve to empty",
 				zap.Int64("max_size", bv.MaxSize),
 				zap.Int("buf_len", len(buf)))
+		} else if bv.logger != nil {
+			bv.logger.Debug("body_vars: JSON parse failed, body_json.* variables will not be set",
+				zap.Error(err),
+				zap.Int("buf_len", len(buf)))
 		}
 	}
 
@@ -795,6 +799,10 @@ func (bv BodyVars) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 					caddyhttp.SetVar(r.Context(), varName, fieldVals[0])
 				}
 			}
+		} else if bv.logger != nil {
+			bv.logger.Debug("body_vars: form parse failed, body_form.* variables will not be set",
+				zap.Error(err),
+				zap.Int("buf_len", len(buf)))
 		}
 	}
 
