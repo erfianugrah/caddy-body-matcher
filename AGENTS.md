@@ -36,8 +36,8 @@ There is no Makefile, no CI pipeline, and no linter config. Always run
 ## Project Layout
 
 ```
-bodymatcher.go        # All production code (~856 lines, single file)
-bodymatcher_test.go   # All tests (~1553 lines, single file)
+bodymatcher.go        # All production code (~935 lines, single file)
+bodymatcher_test.go   # All tests (~1683 lines, single file)
 go.mod                # Go 1.25.0, module github.com/erfianugrah/caddy-body-matcher
 ```
 

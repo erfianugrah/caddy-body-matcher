@@ -1,7 +1,6 @@
 package bodymatcher
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -20,11 +19,6 @@ import (
 
 func newRequest(body string) *http.Request {
 	r := httptest.NewRequest("POST", "/", strings.NewReader(body))
-	return r
-}
-
-func newRequestBytes(body []byte) *http.Request {
-	r := httptest.NewRequest("POST", "/", bytes.NewReader(body))
 	return r
 }
 
